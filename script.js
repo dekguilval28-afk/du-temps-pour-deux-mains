@@ -1,187 +1,242 @@
-const $ = id => document.getElementById(id);
-    const records = new Map();
-    let selectedId = null;
-    let sdkReady = false;
-    let previousFocus = null;
-    const categories = new Set(['Jardinage','Bricolage','Courses','Informatique','Transport','Animaux','Autre']);
+// ===== À REMPLIR : deux valeurs de votre projet Supabase (Project Settings > API) =====
+const SUPABASE_URL = "https://lusozvruydiqtybrrfvn.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1c296dnJ1eWRpcXR5YnJyZnZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM0MzYzNzMsImV4cCI6MjEwOTAxMjM3M30.gbc6PsqZGLanmoO6rwomE3oOxpRwwcYj38EPPgE3hek";
+// ================================================================================
 
-    function message(id, text, error = false) {
-      const node = $(id);
-      node.textContent = text;
-      node.style.color = error ? '#a84839' : '#173e35';
+const ALLOWED_TOWNS = ["Blévy", "Maillebois", "Dampierre-sur-Blévy"];
+
+const grid = document.getElementById("listingGrid");
+const searchInput = document.getElementById("searchInput");
+const categoryFilter = document.getElementById("categoryFilter");
+const typeFilter = document.getElementById("typeFilter");
+const form = document.getElementById("listingForm");
+const feedback = document.getElementById("formFeedback");
+
+if (!window.supabase) {
+  feedback.textContent = "Le module de connexion n'a pas pu se charger (vérifiez votre antivirus).";
+}
+const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+// Mémoire de cet appareil uniquement
+const store = {
+  read(key) { try { return JSON.parse(localStorage.getItem(key) || "{}"); } catch { return {}; } },
+  write(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
+};
+const KEY_DEMANDES = "dtpdm-mes-demandes"; // annonceId -> { demandeId, token }
+const KEY_MINE = "dtpdm-mes-annonces";     // annonceId -> true (annonces publiées sur cet appareil)
+let mesDemandes = store.read(KEY_DEMANDES);
+let mesAnnonces = store.read(KEY_MINE);
+
+let annonces = [];
+let statuts = {};
+
+async function loadAnnonces() {
+  if (!sb) return;
+  const { data, error } = await sb.from("annonces")
+    .select("id,type,categorie,titre,description,commune,created_at")
+    .order("created_at", { ascending: false });
+  if (error) {
+    feedback.textContent = "Impossible de charger les annonces. Vérifiez la configuration Supabase.";
+    return;
+  }
+  annonces = data || [];
+  await Promise.all(Object.entries(mesDemandes).map(async ([id, d]) => {
+    const { data: s } = await sb.rpc("statut_demande", { p_demande: d.demandeId, p_token: d.token });
+    if (s) statuts[id] = s;
+  }));
+  renderListings();
+}
+
+function pill(acceptee) {
+  const span = document.createElement("span");
+  span.className = `status ${acceptee ? "green" : "red"}`;
+  span.textContent = acceptee ? "● Acceptée" : "● En attente";
+  return span;
+}
+
+function renderListings() {
+  const query = searchInput.value.trim().toLocaleLowerCase("fr");
+  const category = categoryFilter.value;
+  const type = typeFilter.value;
+  const filtered = annonces.filter(item => {
+    const text = `${item.titre} ${item.description} ${item.commune} ${item.categorie}`.toLocaleLowerCase("fr");
+    return (!query || text.includes(query)) && (!category || item.categorie === category) && (!type || item.type === type);
+  });
+
+  grid.replaceChildren();
+  if (!filtered.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "Aucune annonce pour le moment.";
+    grid.append(empty);
+    return;
+  }
+
+  filtered.forEach(item => {
+    const card = document.createElement("article");
+    card.className = "listing-card";
+
+    const tag = document.createElement("span");
+    tag.className = `tag ${item.type === "need" ? "need" : ""}`;
+    tag.textContent = item.type === "need" ? "J'AI BESOIN" : "JE PROPOSE";
+    const title = document.createElement("h3");
+    title.textContent = item.titre;
+    const description = document.createElement("p");
+    description.textContent = item.description;
+    const meta = document.createElement("div");
+    meta.className = "listing-meta";
+    meta.textContent = `${item.categorie} · ${item.commune}`;
+
+    const action = document.createElement("div");
+    action.className = "listing-action";
+    const zone = document.createElement("div");
+    zone.className = "demandes-zone";
+
+    if (mesAnnonces[item.id]) {
+      const btn = document.createElement("button");
+      btn.className = "button button-light small";
+      btn.type = "button";
+      btn.textContent = "Gérer les demandes (mon code)";
+      btn.addEventListener("click", () => gererDemandes(item.id, zone));
+      action.append(btn);
+    } else if (mesDemandes[item.id]) {
+      action.append(pill(statuts[item.id] === "acceptee"));
+    } else {
+      const btn = document.createElement("button");
+      btn.className = "button button-light small";
+      btn.type = "button";
+      btn.textContent = "Demander à participer";
+      btn.addEventListener("click", () => demander(item.id));
+      action.append(btn);
     }
-    function formatDate(value) {
-      const date = new Date(value);
-      return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('fr-FR', {day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(date);
-    }
-    async function hashCode(code) {
-      const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(code));
-      return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2,'0')).join('');
-    }
-    function openModal(id) {
-      previousFocus = document.activeElement;
-      $(id).hidden = false;
-      document.body.style.overflow = 'hidden';
-      $(id).querySelector('button, input').focus();
-    }
-    function closeModals() {
-      document.querySelectorAll('.modal-backdrop').forEach(el => el.hidden = true);
-      document.body.style.overflow = '';
-      previousFocus?.focus();
-    }
-    function updateCard(node, item) {
-      const label = item.type === 'offre' ? 'JE PROPOSE' : 'J’AI BESOIN';
-      const photo = node.querySelector('[data-template-id="listing-photo"]');
-      const photoUrl = String(item.photo_url || '').trim();
-      node.querySelector('[data-template-id="listing-type"]').textContent = label;
-      photo.hidden = !/^https:\/\//i.test(photoUrl);
-      if (!photo.hidden) photo.src = photoUrl;
-      else photo.removeAttribute('src');
-      node.querySelector('[data-template-id="listing-title"]').textContent = item.titre || '';
-      node.querySelector('[data-template-id="listing-description"]').textContent = item.description || '';
-      node.querySelector('[data-template-id="listing-meta"]').textContent = `${item.categorie || 'Autre'} · ${item.commune || ''} · ${formatDate(item.created_at)}`;
-    }
-    function render() {
-      const query = $('search').value.trim().toLocaleLowerCase('fr');
-      const type = $('type-filter').value;
-      const category = $('category-filter').value;
-      const matches = [...records.values()].filter(item =>
-        (!type || item.type === type) &&
-        (!category || item.categorie === category) &&
-        (!query || [item.titre,item.description,item.commune].some(v => String(v || '').toLocaleLowerCase('fr').includes(query)))
-      ).sort((a,b) => String(b.created_at).localeCompare(String(a.created_at)));
-      const list = $('list');
-      const visible = new Set(matches.map(item => item.__backendId));
-      [...list.children].forEach(node => { if (!visible.has(node.dataset.recordId)) node.remove(); });
-      matches.forEach(item => {
-        let node = [...list.children].find(el => el.dataset.recordId === item.__backendId);
-        if (!node) {
-          node = $('listing-template').content.firstElementChild.cloneNode(true);
-          node.dataset.recordId = item.__backendId;
-          node.querySelector('button').addEventListener('click', () => showDetail(item.__backendId));
-        }
-        updateCard(node, item);
-        list.appendChild(node);
+
+    const del = document.createElement("button");
+    del.className = "link-btn";
+    del.type = "button";
+    del.textContent = "Retirer mon annonce";
+    del.addEventListener("click", () => supprimer(item.id));
+    action.append(del);
+
+    card.append(tag, title, description, meta, action, zone);
+    grid.append(card);
+  });
+}
+
+async function demander(annonceId) {
+  if (!sb) return;
+  const { data, error } = await sb.rpc("demander_participation", { p_annonce: annonceId });
+  if (error || !data?.length) {
+    feedback.textContent = "La demande n'a pas pu être envoyée. Réessayez.";
+    return;
+  }
+  mesDemandes[annonceId] = { demandeId: data[0].demande_id, token: data[0].token };
+  store.write(KEY_DEMANDES, mesDemandes);
+  statuts[annonceId] = "en_attente";
+  renderListings();
+}
+
+async function gererDemandes(annonceId, zone) {
+  const code = prompt("Entrez le code de votre annonce (5 chiffres) :");
+  if (!code) return;
+  const { data, error } = await sb.rpc("demandes_pour_auteur", { p_annonce: annonceId, p_code: code });
+  zone.replaceChildren();
+  if (error) {
+    zone.textContent = "Code incorrect.";
+    return;
+  }
+  if (!data?.length) {
+    const p = document.createElement("p");
+    p.className = "listing-meta";
+    p.textContent = "Aucune demande pour le moment.";
+    zone.append(p);
+    return;
+  }
+  data.forEach(d => {
+    const row = document.createElement("div");
+    row.className = "demande-row";
+    const acceptee = d.statut === "acceptee";
+    row.append(pill(acceptee));
+    if (!acceptee) {
+      const btn = document.createElement("button");
+      btn.className = "link-btn";
+      btn.type = "button";
+      btn.textContent = "Accepter";
+      btn.addEventListener("click", async () => {
+        await sb.rpc("accepter_demande", { p_demande: d.demande_id, p_code: code });
+        gererDemandes(annonceId, zone);
       });
-      $('count').textContent = `${matches.length} annonce${matches.length > 1 ? 's' : ''}`;
-      $('empty').hidden = matches.length !== 0;
-      if (records.size >= 999) message('status','La limite de 999 annonces est atteinte. Supprimez une annonce avant d’en publier une autre.',true);
+      row.append(btn);
     }
-    function showDetail(id) {
-      const item = records.get(id);
-      if (!item) return;
-      selectedId = id;
-      $('detail-type').textContent = item.type === 'offre' ? 'JE PROPOSE' : 'J’AI BESOIN';
-      $('detail-title').textContent = item.titre || '';
-      $('detail-meta').textContent = [item.categorie,item.commune,formatDate(item.created_at)].filter(Boolean).join(' · ');
-      const detailPhoto = $('detail-photo');
-      const detailPhotoUrl = String(item.photo_url || '').trim();
-      detailPhoto.hidden = !/^https:\/\//i.test(detailPhotoUrl);
-      if (!detailPhoto.hidden) detailPhoto.src = detailPhotoUrl;
-      else detailPhoto.removeAttribute('src');
-      $('detail-description').textContent = item.description || '';
-      $('request-pending').classList.toggle('hidden', item.status === 'accepted');
-      $('request-accepted').classList.toggle('hidden', item.status !== 'accepted');
-      $('delete-form').classList.add('hidden');
-      $('delete-form').reset();
-      message('delete-message','');
-      openModal('detail-modal');
-    }
-    const handler = {
-      onDataChanged(data) {
-        const fresh = new Set(data.map(item => item.__backendId));
-        for (const id of records.keys()) if (!fresh.has(id)) records.delete(id);
-        for (const item of data) records.set(item.__backendId,item);
-        render();
-      }
-    };
-    async function init() {
-      if (!window.dataSdk) { message('status','Impossible de charger les annonces. Réessayez plus tard.',true); return; }
-      try {
-        const result = await window.dataSdk.init(handler);
-        sdkReady = result.isOk;
-        if (!result.isOk) message('status','Impossible de charger les annonces. Réessayez plus tard.',true);
-        else message('status','');
-      } catch (_) { message('status','Impossible de charger les annonces. Réessayez plus tard.',true); }
-    }
-    document.querySelectorAll('[data-open="publish"]').forEach(button => button.addEventListener('click', () => {
-      message('publish-message','');
-      openModal('publish-modal');
-    }));
-    document.querySelectorAll('.close-modal').forEach(button => button.addEventListener('click',closeModals));
-    document.querySelectorAll('.modal-backdrop').forEach(backdrop => backdrop.addEventListener('click', event => {
-      if (event.target === backdrop) closeModals();
-    }));
-    document.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && [...document.querySelectorAll('.modal-backdrop')].some(el => !el.hidden)) closeModals();
-    });
-    ['search','type-filter','category-filter'].forEach(id => $(id).addEventListener(id === 'search' ? 'input' : 'change',render));
-    $('publish-form').addEventListener('submit',async event => {
-      event.preventDefault();
-      if (!sdkReady) { message('publish-message','Les annonces ne sont pas disponibles. Réessayez plus tard.',true); return; }
-      if (records.size >= 999) { message('publish-message','La limite de 999 annonces est atteinte.',true); return; }
-      const button = $('publish-submit');
-      button.disabled = true;
-      message('publish-message','Publication en cours…');
-      try {
-        if (!$('engagement-check').checked) { message('publish-message','Vous devez accepter l’engagement avant de publier votre annonce.',true); return; }
-        const code = $('publish-code').value.trim();
-        if (!/^\d{5}$/.test(code)) { message('publish-message','Saisissez exactement cinq chiffres.',true); return; }
-        const result = await window.dataSdk.create({
-          type:$('publish-type').value,
-          categorie:categories.has($('publish-category').value) ? $('publish-category').value : 'Autre',
-          titre:$('publish-name').value.trim(),
-          description:$('publish-description').value.trim(),
-          commune:$('publish-town').value.trim(),
-          code_hash:await hashCode(code),
-          created_at:new Date().toISOString(),
-          status:'pending'
-        });
-        if (!result.isOk) { message('publish-message','La publication a échoué. Réessayez.',true); return; }
-        $('publish-form').reset();
-        closeModals();
-        message('status','Votre annonce a bien été publiée.');
-      } catch (_) { message('publish-message','La publication a échoué. Réessayez.',true); }
-      finally { button.disabled = false; }
-    });
-    $('request-pending').addEventListener('click',async () => {
-      const item = records.get(selectedId);
-      if (!sdkReady || !item || item.status === 'accepted') return;
-      const button = $('request-pending');
-      button.disabled = true;
-      const result = await window.dataSdk.update({...item, status:'accepted'});
-      button.disabled = false;
-      if (result.isOk) {
-        item.status = 'accepted';
-        $('request-pending').classList.add('hidden');
-        $('request-accepted').classList.remove('hidden');
-        window.open('https://form.jotform.com/263102513390042', '_blank', 'noopener,noreferrer');
-      } else {
-        message('delete-message','Impossible d’accepter la demande. Réessayez.',true);
-      }
-    });
-    $('show-delete').addEventListener('click',() => { $('delete-form').classList.remove('hidden'); $('delete-code').focus(); });
-    $('cancel-delete').addEventListener('click',() => { $('delete-form').classList.add('hidden'); $('delete-form').reset(); message('delete-message',''); });
-    $('delete-form').addEventListener('submit',async event => {
-      event.preventDefault();
-      const item = records.get(selectedId);
-      if (!sdkReady || !item) { message('delete-message','Annonce indisponible. Réessayez.',true); return; }
-      const button = $('delete-submit');
-      button.disabled = true;
-      message('delete-message','Vérification en cours…');
-      try {
-        const entered = $('delete-code').value.trim();
-        const expectedHash = String(item.code_hash || '').trim().toLowerCase();
-        const enteredHash = await hashCode(entered);
-        if (!/^\d{5}$/.test(entered) || !expectedHash || enteredHash.toLowerCase() !== expectedHash) {
-          message('delete-message','Code incorrect. Vérifiez les cinq chiffres saisis.',true); return;
-        }
-        const result = await window.dataSdk.delete(item);
-        if (!result.isOk) { message('delete-message','La suppression a échoué. Réessayez.',true); return; }
-        closeModals();
-        message('status','Votre annonce a bien été supprimée.');
-      } catch (_) { message('delete-message','La suppression a échoué. Réessayez.',true); }
-      finally { button.disabled = false; }
-    });
-    if (window.lucide) lucide.createIcons();
-    init();
+    zone.append(row);
+  });
+}
+
+async function supprimer(annonceId) {
+  const code = prompt("Entrez le code de votre annonce pour la retirer (5 chiffres) :");
+  if (!code) return;
+  const { data, error } = await sb.rpc("supprimer_annonce", { p_annonce: annonceId, p_code: code });
+  if (error || !data) {
+    feedback.textContent = "Code incorrect : l'annonce n'a pas été retirée.";
+    return;
+  }
+  delete mesAnnonces[annonceId];
+  store.write(KEY_MINE, mesAnnonces);
+  feedback.textContent = "Votre annonce a été retirée.";
+  await loadAnnonces();
+}
+
+form.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!sb) return;
+  const code = document.getElementById("listingCode").value.trim();
+  const town = document.getElementById("listingTown").value;
+  const title = document.getElementById("listingTitle").value.trim();
+  const description = document.getElementById("listingDescription").value.trim();
+
+  if (!/^\d{5}$/.test(code)) {
+    feedback.textContent = "Le code doit contenir exactement 5 chiffres.";
+    return;
+  }
+  if (!ALLOWED_TOWNS.includes(town) || !title || !description) {
+    feedback.textContent = "Merci de compléter tous les champs avec une commune de la liste.";
+    return;
+  }
+
+  const { data, error } = await sb.rpc("publier_annonce", {
+    p_code: code,
+    p_type: document.getElementById("listingType").value,
+    p_categorie: document.getElementById("listingCategory").value,
+    p_titre: title,
+    p_commune: town,
+    p_description: description
+  });
+
+  if (error) {
+    feedback.textContent = "L'annonce n'a pas pu être publiée. Vérifiez les champs et réessayez.";
+    return;
+  }
+
+  mesAnnonces[data] = true;
+  store.write(KEY_MINE, mesAnnonces);
+  form.reset();
+  feedback.textContent = "Annonce publiée. Gardez bien votre code à 5 chiffres : il vous servira à gérer les demandes.";
+  await loadAnnonces();
+  document.getElementById("annonces").scrollIntoView({ behavior: "smooth" });
+});
+
+[searchInput, categoryFilter, typeFilter].forEach(el => el.addEventListener("input", renderListings));
+
+const menuToggle = document.getElementById("menuToggle");
+const nav = document.getElementById("mainNav");
+menuToggle.addEventListener("click", () => {
+  const opened = nav.classList.toggle("open");
+  menuToggle.setAttribute("aria-expanded", String(opened));
+});
+nav.querySelectorAll("a").forEach(link => link.addEventListener("click", () => {
+  nav.classList.remove("open");
+  menuToggle.setAttribute("aria-expanded", "false");
+}));
+document.getElementById("year").textContent = new Date().getFullYear();
+
+loadAnnonces();
+
